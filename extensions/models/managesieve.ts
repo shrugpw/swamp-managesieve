@@ -882,7 +882,26 @@ export function defaultTransportFactory(
   };
   return {
     async connect() {
-      conn = await withTimeout(deps.connect(cfg), cfg.timeoutMs, "connect");
+      // If the deadline fires before deps.connect settles, withTimeout rejects
+      // and `conn` is never assigned -- so a socket that resolves late would be
+      // dropped un-closed (an fd leak). Hold the connect promise and, on
+      // timeout, close whatever it eventually yields. (write/startTls close an
+      // already-captured `conn`; connect has none yet, so it must close the
+      // late arrival itself.)
+      const connecting = deps.connect(cfg);
+      conn = await withTimeout(connecting, cfg.timeoutMs, "connect", () => {
+        connecting
+          .then((late) => {
+            try {
+              late.close();
+            } catch {
+              // already closed / never fully opened
+            }
+          })
+          .catch(() => {
+            // connect ultimately failed; nothing to close
+          });
+      });
       reader = new LineReader(conn, cfg.timeoutMs);
     },
     readLine() {
@@ -1453,7 +1472,15 @@ export const model = {
         const transport = (args._transport ?? defaultTransportFactory)(cfg);
         try {
           await sieveConnect(transport, cfg);
+          context.logger.info("Fetching sieve script {name} from {host}", {
+            name: args.name,
+            host: cfg.host,
+          });
           const content = await cmdGetScript(transport, args.name);
+          context.logger.info("Fetched sieve script {name} ({bytes} bytes)", {
+            name: args.name,
+            bytes: textEncoder.encode(content).length,
+          });
           const handle = await context.writeResource(
             "script",
             `script:${scriptSlug(args.name)}`,
@@ -1483,8 +1510,14 @@ export const model = {
         const transport = (args._transport ?? defaultTransportFactory)(cfg);
         try {
           await sieveConnect(transport, cfg);
+          context.logger.info("Reading active sieve script on {host}", {
+            host: cfg.host,
+          });
           const scripts = await cmdListScripts(transport);
           const active = scripts.find((s) => s.active)?.name ?? null;
+          context.logger.info("Active sieve script is {name}", {
+            name: active ?? "(none)",
+          });
           const handle = await context.writeResource("activeScript", "active", {
             name: active,
             retrievedAt: new Date().toISOString(),
@@ -1510,7 +1543,14 @@ export const model = {
         const transport = (args._transport ?? defaultTransportFactory)(cfg);
         try {
           await sieveConnect(transport, cfg);
+          context.logger.info(
+            "Checking sieve script ({bytes} bytes) on {host}",
+            { bytes: textEncoder.encode(args.text).length, host: cfg.host },
+          );
           const result = await cmdCheckScript(transport, args.text);
+          context.logger.info("Checked sieve script: ok={ok}", {
+            ok: result.ok,
+          });
           const digest = await digestHex(args.text);
           const handle = await context.writeResource(
             "checkResult",
@@ -1583,6 +1623,10 @@ export const model = {
             : null;
 
           if (dryRun) {
+            context.logger.info(
+              "Previewed putScript for {name} (dryRun, no mutation)",
+              { name: args.name },
+            );
             const handle = await context.writeResource(
               "wouldAffect",
               instanceName,
@@ -1687,8 +1731,15 @@ export const model = {
         const dryRun = args.dryRun ?? true;
         const cfg = context.globalArgs;
         const transport = (args._transport ?? defaultTransportFactory)(cfg);
-        const target = args.name === "" ? "__none__" : scriptSlug(args.name);
-        const instanceName = `activate:${target}`;
+        // The deactivate case (name "") has no script name; give it a
+        // dedicated instance name rather than a sentinel slug. A slug can never
+        // contain a raw ":" (scriptSlug percent-escapes everything outside
+        // [A-Za-z0-9_.-]), so "deactivate" cannot collide with activate:<slug>
+        // for ANY script name -- including one literally named "__none__",
+        // which the old "activate:__none__" sentinel aliased.
+        const instanceName = args.name === ""
+          ? "deactivate"
+          : `activate:${scriptSlug(args.name)}`;
         try {
           await sieveConnect(transport, cfg);
           const scripts = await cmdListScripts(transport);
@@ -1703,6 +1754,10 @@ export const model = {
           const changed = !refused && currentActive !== after;
 
           if (dryRun) {
+            context.logger.info(
+              "Previewed setActive to {name} (dryRun, no mutation)",
+              { name: args.name || "(none)" },
+            );
             const handle = await context.writeResource(
               "wouldAffect",
               instanceName,
@@ -1821,6 +1876,10 @@ export const model = {
           const changed = exists && !refused;
 
           if (dryRun) {
+            context.logger.info(
+              "Previewed deleteScript for {name} (dryRun, no mutation)",
+              { name: args.name },
+            );
             const handle = await context.writeResource(
               "wouldAffect",
               instanceName,

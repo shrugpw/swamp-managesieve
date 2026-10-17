@@ -1191,6 +1191,61 @@ Deno.test("MS-4: startTls passes tlsRejectUnauthorized through to deps.startTls"
 });
 
 // ---------------------------------------------------------------------------
+// F1: a connect that resolves AFTER the deadline is still closed (no fd leak)
+// ---------------------------------------------------------------------------
+
+Deno.test("connect timeout closes a socket that resolves after the deadline (no fd leak)", async () => {
+  const late = new FakeByteConn(new Uint8Array(0));
+  let resolveConn!: (c: ByteConn) => void;
+  const connecting = new Promise<ByteConn>((res) => {
+    resolveConn = res;
+  });
+  const deps: TransportDeps = {
+    connect: () => connecting,
+    startTls: (_c, _h, _r) => Promise.resolve(late),
+  };
+  const t = defaultTransportFactory({ ...CFG, timeoutMs: 1 }, deps);
+  // The deadline (1 ms) fires while deps.connect is still pending.
+  await assertRejects(() => t.connect(), Error, "connect timed out");
+  // The socket now arrives late, AFTER the connect already rejected. The
+  // connect-timeout path must still close it -- the factory never captured it
+  // into `conn`, so the method's finally->close() has nothing to close and the
+  // fd would otherwise leak.
+  resolveConn(late);
+  await new Promise((r) => setTimeout(r, 5));
+  assertEquals(late.closed, true);
+});
+
+// ---------------------------------------------------------------------------
+// F2: the deactivate audit record never aliases a script literally named
+// "__none__"
+// ---------------------------------------------------------------------------
+
+Deno.test("setActive: deactivate audit instance name cannot collide with a script named __none__", async () => {
+  // Case 1: deactivate (name ""), with some other script currently active.
+  const d = handshakeBytes('"foo" ACTIVE', "OK");
+  const td = new FakeTransport(d.pre, d.post);
+  const ctxD = makeContext();
+  await model.methods.setActive.execute(
+    { name: "", dryRun: true, _transport: transportFactory(td) },
+    ctxD.context,
+  );
+  // Case 2: activate a script that is LITERALLY named "__none__".
+  const a = handshakeBytes('"__none__"', "OK");
+  const ta = new FakeTransport(a.pre, a.post);
+  const ctxA = makeContext();
+  await model.methods.setActive.execute(
+    { name: "__none__", dryRun: true, _transport: transportFactory(ta) },
+    ctxA.context,
+  );
+  assertEquals(ctxD.writes[0].name, "deactivate");
+  assertEquals(ctxA.writes[0].name, "activate:__none__");
+  // The regression guard: the two audit records must NOT share an instance
+  // name (the old "activate:__none__" deactivate sentinel aliased case 2).
+  assertEquals(ctxD.writes[0].name !== ctxA.writes[0].name, true);
+});
+
+// ---------------------------------------------------------------------------
 // MS-5: untrusted server text is sanitized before entering errors/resources
 // ---------------------------------------------------------------------------
 
