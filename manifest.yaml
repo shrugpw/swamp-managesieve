@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@shrug/managesieve"
+version: "2026.10.03.1"
+description: "Provider-agnostic ManageSieve (RFC 5804) client built directly on Deno's native TCP/TLS primitives -- no third-party ManageSieve library exists on npm with any real maintenance signal, so the small line protocol (STARTTLS, SASL PLAIN, and the literal/quoted string framing for LISTSCRIPTS/GETSCRIPT/PUTSCRIPT/SETACTIVE/DELETESCRIPT/CHECKSCRIPT) is implemented in-repo behind a single injectable transport seam. Read-only methods: listScripts, getScript, getActive, checkScript (CHECKSCRIPT without installing). Gated write methods: putScript, setActive, deleteScript -- dryRun defaults true, every write validates via CHECKSCRIPT first (putScript) or a live LISTSCRIPTS snapshot (setActive/deleteScript), and deleteScript refuses to remove the currently-active script. Script names/text are always sent as RFC 5804 non-synchronizing literals ({n+}), which are purely length-prefixed, so no caller-supplied content can ever be interpreted as a protocol boundary."
+
+repository: https://github.com/shrugpw/swamp-managesieve
+
+# Per-extension-subdir layout: typed keys + additionalFiles resolve relative to
+# this manifest's own directory, not the repo-wide extensions/models/ dir.
+paths:
+  base: manifest
+
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+
+models:
+  - extensions/models/managesieve.ts
+
+# Empty platforms == universal. Talks ManageSieve over native Deno TCP/TLS
+# (Deno.connect/Deno.startTls); no host binaries or npm deps, so it runs
+# anywhere the Deno runtime does.
+platforms: []
+
+labels:
+  - managesieve
+  - sieve
+  - rfc5804
+  - email
